@@ -1,0 +1,7 @@
+{
+  "idf.port": "/dev/ttyUSB0",
+  "files.associations": {
+    "kernel.h": "c",
+    "nrf_modem_at.h": "c"
+  }
+}
