@@ -166,7 +166,6 @@ static int topics_prefix(void)
 	return 0;
 }
 
-
 static void subscribe(void)
 {
 	int err;
@@ -224,7 +223,7 @@ static void connect_work_fn(struct k_work *work)
 		SEND_FATAL_ERROR();
 		return;
 	}
-	
+
 	conn_params.last_will_topic.ptr = pub_topic;
 	conn_params.last_will_topic.size = strlen(pub_topic);
 	err = dynsec_mqtt_helper_connect(&conn_params);
