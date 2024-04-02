@@ -1,6 +1,13 @@
 #!/bin/sh
+current_dir=$PWD
 
-. ~/proj/venv/bin/activate
+cd ~/proj/venv 
+
+. bin/activate
+
+west zephyr-export
+
+cd ${current_dir}
 TOP=~/proj/velopera/repos/velopera-nrf-firmware
 west build --build-dir ${TOP}/build ${TOP} \
 	--pristine --board nrf9160dk_nrf9160_ns \

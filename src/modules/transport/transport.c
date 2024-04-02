@@ -11,10 +11,15 @@
 #include <zephyr/net/tls_credentials.h>
 #include "dynsec_mqtt_helper.h"
 #include "message_channel.h"
+#include <modem/modem_info.h>
+
+#include "firmware_version.h"
 extern char imei[16];
 
+uint8_t login_topic[50] = "";
+
 /* Register log module */
-LOG_MODULE_REGISTER(transport, CONFIG_MQTT_SAMPLE_TRANSPORT_LOG_LEVEL);
+LOG_MODULE_REGISTER(transport, 4);
 
 /* Register subscriber */
 ZBUS_SUBSCRIBER_DEFINE(transport, CONFIG_MQTT_SAMPLE_TRANSPORT_MESSAGE_QUEUE_SIZE);
@@ -36,7 +41,7 @@ K_THREAD_STACK_DEFINE(stack_area, CONFIG_MQTT_SAMPLE_TRANSPORT_WORKQUEUE_STACK_S
  * schedule reconnectionn attempts upon network loss or disconnection from MQTT.
  */
 static struct k_work_q transport_queue;
-
+struct velopera_payload login_msg;
 /* Internal states */
 enum module_state
 {
@@ -44,11 +49,9 @@ enum module_state
 	MQTT_DISCONNECTED
 };
 
-/* MQTT client ID buffer */
-static char client_id[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE];
-
-static uint8_t pub_topic[sizeof(client_id) + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_PUBLISH_TOPIC)];
-static uint8_t sub_topic[sizeof(client_id) + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
+static uint8_t pub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_PUBLISH_TOPIC)];
+static uint8_t fota_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
+static uint8_t psk_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
 
 /* User defined state object.
  * Used to transfer data between state changes.
@@ -65,10 +68,20 @@ static struct s_object
 	enum network_status status;
 
 	/* Payload */
-	struct payload payload;
+	struct velopera_payload payload;
+
+	/* Topic */
+	uint8_t *topic;
 } s_obj;
 
-static void publish(struct payload *payload)
+/**
+ * @brief This helper function publishes an MQTT message to the broker
+ *
+ * @param payload  message that wanted to publish
+ * @param topic topic of the published message
+ * @param topic_size size of the topic
+ */
+static void publish(struct velopera_payload *payload, uint8_t *topic, size_t topic_size)
 {
 	int err;
 
@@ -77,8 +90,8 @@ static void publish(struct payload *payload)
 		.message.payload.len = strlen(payload->string),
 		.message.topic.qos = MQTT_QOS_1_AT_LEAST_ONCE,
 		.message_id = k_uptime_get_32(),
-		.message.topic.topic.utf8 = pub_topic,
-		.message.topic.topic.size = strlen(pub_topic),
+		.message.topic.topic.utf8 = topic,
+		.message.topic.topic.size = strlen(topic),
 	};
 
 	err = dynsec_mqtt_helper_publish(&param);
@@ -88,10 +101,53 @@ static void publish(struct payload *payload)
 		return;
 	}
 
-	LOG_INF("Published message: \"%.*s\" on topic: \"%.*s\"", param.message.payload.len,
+	LOG_DBG("Published message: \"%.*s\" on topic: \"%.*s\"", param.message.payload.len,
 			param.message.payload.data,
 			param.message.topic.topic.size,
 			param.message.topic.topic.utf8);
+}
+
+static int modify_login_info_msg(char *msg, size_t msg_size)
+{
+
+	struct modem_param_info modem_param;
+
+	int err = modem_info_init();
+	if (err)
+	{
+		LOG_ERR("Failed to initialize modem info: %d", err);
+	}
+
+	err = modem_info_params_init(&modem_param);
+	if (err)
+	{
+		LOG_ERR("Failed to initialize modem info: %d", err);
+	}
+
+	err = modem_info_params_get(&modem_param);
+	if (err)
+	{
+		LOG_ERR("Failed to initialize modem info: %d", err);
+	}
+
+	LOG_DBG("====== modify_login_info_msg ======");
+	err = snprintf(msg, msg_size, "{\"networkStatus\":\"online\",\"rsrp\":%d,\"iccid\":\"%s\",\"mcc\":\"%x\",\"mnc\":\"%s\",\"cid\":\"%s\",\"band\":\"%d\",\"areaCode\":\"%s\",\"op\":\"%s\",\"modem\":\"%s\",\"fw\":\"%s\"}",
+				   modem_param.network.rsrp.value, modem_param.sim.iccid.value_string,
+				   modem_param.network.mcc.value, modem_param.network.mnc.value_string,
+				   modem_param.network.cellid_hex.value_string, modem_param.network.current_band.value,
+				   modem_param.network.area_code.value_string, modem_param.network.current_operator.value_string,
+				   modem_param.device.modem_fw.value_string, getFirmwareVersion()->full);
+
+	if (err < 0)
+	{
+		LOG_ERR("snprintf %d", err);
+	}
+
+	// LOG_INF("IP Address: %s", modem_param.network.ip_address.value_string);
+
+	LOG_DBG("msg (JSON): %s, size %d", msg, err);
+	LOG_DBG("===============================");
+	return err;
 }
 
 /* Callback handlers from MQTT helper library.
@@ -101,11 +157,7 @@ static void publish(struct payload *payload)
 static void on_mqtt_connack(enum mqtt_conn_return_code return_code)
 {
 	ARG_UNUSED(return_code);
-	struct payload payload =
-		{
-			.string = "{\"status\":\"connected\"}",
-		};
-	publish(&payload);
+
 	smf_set_state(SMF_CTX(&s_obj), &state[MQTT_CONNECTED]);
 }
 
@@ -122,13 +174,27 @@ static void on_mqtt_publish(struct dynsec_mqtt_helper_buf topic, struct dynsec_m
 			payload.ptr,
 			topic.size,
 			topic.ptr);
+
+	if (strncmp(topic.ptr, fota_sub_topic, sizeof(fota_sub_topic)) == 0)
+	{
+		LOG_DBG("FOTA request received for firmware %s", payload.ptr);
+
+		int err = zbus_chan_pub(&FOTA_CHAN, &payload, K_SECONDS(1));
+		if (err)
+		{
+			LOG_ERR("zbus_chan_pub, error: %d", err);
+			SEND_FATAL_ERROR();
+		}
+
+		LOG_DBG("FOTA request redirected to FOTA_CHAN");
+	}
 }
 
 static void on_mqtt_suback(uint16_t message_id, int result)
 {
 	if ((message_id == SUBSCRIBE_TOPIC_ID) && (result == 0))
 	{
-		LOG_INF("Subscribed to topic %s", sub_topic);
+		LOG_INF("Subscribed to topic %s and topic %s", fota_sub_topic, psk_sub_topic);
 	}
 	else if (result)
 	{
@@ -155,11 +221,20 @@ static int topics_prefix(void)
 		return -EMSGSIZE;
 	}
 
-	len = snprintk(sub_topic, sizeof(sub_topic), "ind/%s/%s", imei,
-				   CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC);
-	if ((len < 0) || (len >= sizeof(sub_topic)))
+	len = snprintk(fota_sub_topic, sizeof(fota_sub_topic), "cmd/%s/%s", imei,
+				   "fota");
+
+	if ((len < 0) || (len >= sizeof(fota_sub_topic)))
 	{
-		LOG_ERR("Subscribe topic buffer too small");
+		LOG_ERR("Subscribe topic buffer too small %d", __LINE__);
+		return -EMSGSIZE;
+	}
+	len = snprintk(psk_sub_topic, sizeof(psk_sub_topic), "cmd/%s/%s", imei,
+				   "psk");
+
+	if ((len < 0) || (len >= sizeof(psk_sub_topic)))
+	{
+		LOG_ERR("Subscribe topic buffer too small %d", __LINE__);
 		return -EMSGSIZE;
 	}
 
@@ -171,8 +246,12 @@ static void subscribe(void)
 	int err;
 	struct mqtt_topic topics[] = {
 		{
-			.topic.utf8 = sub_topic,
-			.topic.size = strlen(sub_topic),
+			.topic.utf8 = fota_sub_topic,
+			.topic.size = strlen(fota_sub_topic),
+		},
+		{
+			.topic.utf8 = psk_sub_topic,
+			.topic.size = strlen(psk_sub_topic),
 		},
 	};
 	struct mqtt_subscription_list list = {
@@ -202,7 +281,6 @@ static void connect_work_fn(struct k_work *work)
 	ARG_UNUSED(work);
 
 	int err;
-
 	struct dynsec_mqtt_helper_conn_params conn_params = {
 		.hostname.ptr = CONFIG_MQTT_SAMPLE_TRANSPORT_BROKER_HOSTNAME,
 		.hostname.size = strlen(CONFIG_MQTT_SAMPLE_TRANSPORT_BROKER_HOSTNAME),
@@ -212,10 +290,10 @@ static void connect_work_fn(struct k_work *work)
 		.device_id.size = strlen(imei),
 		.password.ptr = imei, // TODO: for now!
 		.password.size = strlen(imei),
-		.last_will_message.ptr = "{\"status\": \"disconnected\"}",
-		.last_will_message.size = strlen("{\"status\": \"disconnected\"}"),
+		.last_will_message.ptr = "{\"networkStatus\":\"offline\"}",
+		.last_will_message.size = strlen("{\"networkStatus\":\"offline\"}"),
 	};
-
+	err = snprintf(login_topic, sizeof(login_topic), "ind/%s/login", imei);
 	err = topics_prefix();
 	if (err)
 	{
@@ -223,11 +301,9 @@ static void connect_work_fn(struct k_work *work)
 		SEND_FATAL_ERROR();
 		return;
 	}
-
-	conn_params.last_will_topic.ptr = pub_topic;
-	conn_params.last_will_topic.size = strlen(pub_topic);
+	conn_params.last_will_topic.ptr = login_topic;
+	conn_params.last_will_topic.size = strlen(login_topic);
 	err = dynsec_mqtt_helper_connect(&conn_params);
-
 	if (err)
 	{
 		LOG_ERR("Failed connecting to MQTT, error code: %d", err);
@@ -281,7 +357,7 @@ static void connected_entry(void *o)
 {
 	LOG_INF("Connected to MQTT broker");
 	LOG_INF("Hostname: %s", CONFIG_MQTT_SAMPLE_TRANSPORT_BROKER_HOSTNAME);
-	LOG_INF("Client ID: %s", client_id);
+	LOG_INF("Client ID: %s", imei);
 	LOG_INF("Port: %d", CONFIG_DYNSEC_MQTT_HELPER_PORT);
 	LOG_INF("TLS: %s", IS_ENABLED(CONFIG_MQTT_LIB_TLS) ? "Yes" : "No");
 
@@ -289,6 +365,8 @@ static void connected_entry(void *o)
 
 	/* Cancel any ongoing connect work when we enter connected state */
 	k_work_cancel_delayable(&connect_work);
+
+	publish(&login_msg, login_topic, 50);
 
 	subscribe();
 }
@@ -308,12 +386,12 @@ static void connected_run(void *o)
 		return;
 	}
 
-	if (user_object->chan != &PAYLOAD_CHAN)
+	if (user_object->chan != &MQTT_CHAN)
 	{
 		return;
 	}
 
-	publish(&user_object->payload);
+	publish(&user_object->payload, user_object->topic, sizeof(user_object->topic));
 }
 
 /* Function executed when the module exits the connected state. */
@@ -334,10 +412,11 @@ static void transport_task(void)
 {
 	int err;
 	static bool certs_added;
+	LOG_INF("Transport task startup LINE %d", __LINE__);
 
 	const struct zbus_channel *chan;
 	enum network_status status;
-	struct payload payload;
+	struct velopera_payload payload;
 	struct dynsec_mqtt_helper_cfg cfg = {
 		.cb = {
 			.on_connack = on_mqtt_connack,
@@ -346,6 +425,8 @@ static void transport_task(void)
 			.on_suback = on_mqtt_suback,
 		},
 	};
+
+	s_obj.topic = pub_topic;
 
 	/* Initialize and start application workqueue.
 	 * This workqueue can be used to offload tasks and/or as a timer when wanting to
@@ -384,6 +465,8 @@ static void transport_task(void)
 				return;
 			}
 
+			err = modify_login_info_msg(login_msg.string, sizeof(login_msg.string));
+
 			s_obj.status = status;
 
 			err = smf_run_state(SMF_CTX(&s_obj));
@@ -395,10 +478,10 @@ static void transport_task(void)
 			}
 		}
 
-		if (&PAYLOAD_CHAN == chan)
+		if (&MQTT_CHAN == chan)
 		{
 
-			err = zbus_chan_read(&PAYLOAD_CHAN, &payload, K_SECONDS(1));
+			err = zbus_chan_read(&MQTT_CHAN, &payload, K_SECONDS(1));
 			if (err)
 			{
 				LOG_ERR("zbus_chan_read, error: %d", err);
@@ -420,5 +503,5 @@ static void transport_task(void)
 }
 
 K_THREAD_DEFINE(transport_task_id,
-				CONFIG_MQTT_SAMPLE_TRANSPORT_THREAD_STACK_SIZE,
+				4096,
 				transport_task, NULL, NULL, NULL, 3, 0, 0);

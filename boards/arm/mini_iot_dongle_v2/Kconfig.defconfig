@@ -1,0 +1,10 @@
+# Copyright (c) 2024 Nordic Semiconductor ASA
+# SPDX-License-Identifier: Apache-2.0
+
+if BOARD_MINI_IOT_DONGLE_V2
+
+config BOARD
+	default "mini_iot_dongle_v2"
+
+
+endif

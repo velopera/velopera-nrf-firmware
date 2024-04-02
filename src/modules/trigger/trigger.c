@@ -29,7 +29,7 @@ static const struct device *const dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
 
 /* Register log module */
 LOG_MODULE_REGISTER(trigger, CONFIG_MQTT_SAMPLE_TRIGGER_LOG_LEVEL);
-struct payload payload = {0};
+struct velopera_payload payload = {0};
 int len;
 static struct k_sem uart_sem; // created semaphore
 uint8_t rx_byte;
@@ -102,7 +102,7 @@ static void trigger_task(void)
 	{
 		if ((payload.string[0] != '\0' && strlen(payload.string) > 0))
 		{
-			err = zbus_chan_pub(&PAYLOAD_CHAN, &payload, K_SECONDS(10));
+			err = zbus_chan_pub(&MQTT_CHAN, &payload, K_SECONDS(10));
 			if (err)
 			{
 				LOG_ERR("zbus_chan_pub, error:%d", err);

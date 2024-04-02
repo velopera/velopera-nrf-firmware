@@ -10,34 +10,35 @@
 
 #include "message_channel.h"
 
-ZBUS_CHAN_DEFINE(TRIGGER_CHAN,			/* Name */
-		 int,				/* Message type */
-		 NULL,				/* Validator */
-		 NULL,				/* User data */
-		 ZBUS_OBSERVERS(sampler),	/* Observers */
-		 ZBUS_MSG_INIT(0)		/* Initial value {0} */
+/* Define FOTA_CHAN */
+ZBUS_CHAN_DEFINE(FOTA_CHAN,							  /* Name */
+				 struct fota_filename,				  /* Message type */
+				 NULL,								  /* Validator */
+				 NULL,								  /* User data */
+				 ZBUS_OBSERVERS(fota_app, transport), /* Observers */
+				 ZBUS_MSG_INIT(0)					  /* Initial value {0} */
 );
 
-ZBUS_CHAN_DEFINE(PAYLOAD_CHAN,
-		 struct payload,
-		 NULL,
-		 NULL,
-		 ZBUS_OBSERVERS(transport),
-		 ZBUS_MSG_INIT(0)
-);
+/* Define MQTT_CHAN */
+ZBUS_CHAN_DEFINE(MQTT_CHAN,
+				 struct velopera_payload,
+				 NULL,
+				 NULL,
+				 ZBUS_OBSERVERS(transport),
+				 ZBUS_MSG_INIT(0));
 
+/* Define NETWORK_CHAN */
 ZBUS_CHAN_DEFINE(NETWORK_CHAN,
-		 enum network_status,
-		 NULL,
-		 NULL,
-		 ZBUS_OBSERVERS(transport IF_ENABLED(CONFIG_MQTT_SAMPLE_LED, (, led)), sampler),
-		 ZBUS_MSG_INIT(0)
-);
+				 enum network_status,
+				 NULL,
+				 NULL,
+				 ZBUS_OBSERVERS(transport),
+				 ZBUS_MSG_INIT(0));
 
+/* Define FATAL_ERROR_CHAN */
 ZBUS_CHAN_DEFINE(FATAL_ERROR_CHAN,
-		 int,
-		 NULL,
-		 NULL,
-		 ZBUS_OBSERVERS(error),
-		 ZBUS_MSG_INIT(0)
-);
+				 int,
+				 NULL,
+				 NULL,
+				 ZBUS_OBSERVERS(error),
+				 ZBUS_MSG_INIT(0));
