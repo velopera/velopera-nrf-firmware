@@ -30,9 +30,14 @@ ZBUS_SUBSCRIBER_DEFINE(transport, CONFIG_MQTT_SAMPLE_TRANSPORT_MESSAGE_QUEUE_SIZ
 /* Forward declarations */
 static const struct smf_state state[];
 static void connect_work_fn(struct k_work *work);
+static void mqtt_pub_work_fn(struct k_work *work);
 
 /* Define connection work - Used to handle reconnection attempts to the MQTT broker */
 static K_WORK_DELAYABLE_DEFINE(connect_work, connect_work_fn);
+static K_WORK_DELAYABLE_DEFINE(mqtt_pub_work, mqtt_pub_work_fn);
+
+K_MSGQ_DEFINE(gps_data_queue, sizeof(struct velopera_gps_data), 20, 4);
+K_MSGQ_DEFINE(sensor_data_queue, sizeof(struct velopera_payload), 20, 4);
 
 /* Define stack_area of application workqueue */
 K_THREAD_STACK_DEFINE(stack_area, CONFIG_MQTT_SAMPLE_TRANSPORT_WORKQUEUE_STACK_SIZE);
@@ -41,7 +46,10 @@ K_THREAD_STACK_DEFINE(stack_area, CONFIG_MQTT_SAMPLE_TRANSPORT_WORKQUEUE_STACK_S
  * schedule reconnectionn attempts upon network loss or disconnection from MQTT.
  */
 static struct k_work_q transport_queue;
+
 struct velopera_payload login_msg;
+struct velopera_gps_data gps_data;
+
 /* Internal states */
 enum module_state
 {
@@ -50,6 +58,8 @@ enum module_state
 };
 
 static uint8_t pub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_PUBLISH_TOPIC)];
+static uint8_t gps_pub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
+
 static uint8_t fota_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
 static uint8_t psk_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
 
@@ -221,6 +231,13 @@ static int topics_prefix(void)
 		return -EMSGSIZE;
 	}
 
+	len = snprintk(gps_pub_topic, sizeof(gps_pub_topic), "ind/%s/gps", imei);
+	if ((len < 0) || (len >= sizeof(pub_topic)))
+	{
+		LOG_ERR("Publish topic buffer too small");
+		return -EMSGSIZE;
+	}
+
 	len = snprintk(fota_sub_topic, sizeof(fota_sub_topic), "cmd/%s/%s", imei,
 				   "fota");
 
@@ -312,6 +329,63 @@ static void connect_work_fn(struct k_work *work)
 	k_work_reschedule_for_queue(&transport_queue, &connect_work,
 								K_SECONDS(CONFIG_MQTT_SAMPLE_TRANSPORT_RECONNECTION_TIMEOUT_SECONDS));
 }
+void mqtt_pub_work_fn(struct k_work *work)
+{
+	struct velopera_gps_data gps_data;
+	struct velopera_payload payload;
+	int err;
+	printf("%d \r\n", __LINE__);
+	while (k_msgq_get(&gps_data_queue, &gps_data, K_NO_WAIT) == 0)
+	{
+		sprintf(payload.string, GNSS_DATA_JSON,
+				gps_data.pvt.latitude,
+				gps_data.pvt.longitude,
+				gps_data.pvt.altitude,
+				gps_data.pvt.accuracy,
+				gps_data.pvt.speed,
+				gps_data.pvt.speed_accuracy,
+				gps_data.pvt.heading,
+				gps_data.pvt.datetime.year,
+				gps_data.pvt.datetime.month,
+				gps_data.pvt.datetime.day,
+				gps_data.pvt.datetime.hour,
+				gps_data.pvt.datetime.minute,
+				gps_data.pvt.datetime.seconds,
+				gps_data.pvt.datetime.ms,
+				gps_data.pvt.pdop,
+				gps_data.pvt.hdop,
+				gps_data.pvt.vdop,
+				gps_data.pvt.tdop,
+				gps_data.meas_id);
+
+		printf("%s\n", payload.string);
+
+		publish(&payload, gps_pub_topic, sizeof(gps_pub_topic));
+		// int err = smf_run_state(SMF_CTX(&s_obj));
+		// if (err)
+		// {
+		// 	LOG_ERR("smf_run_state, error: %d", err);
+		// 	SEND_FATAL_ERROR();
+		// 	return;
+		// }
+	}
+	while (k_msgq_get(&sensor_data_queue, &payload, K_NO_WAIT) == 0)
+	{
+
+		printf("%s\n", payload.string);
+
+		s_obj.payload = payload;
+		s_obj.topic = pub_topic;
+		publish(&payload, pub_topic, sizeof(pub_topic));
+		// err = smf_run_state(SMF_CTX(&s_obj));
+		// if (err)
+		// {
+		// 	LOG_ERR("smf_run_state, error: %d", err);
+		// 	SEND_FATAL_ERROR();
+		// 	return;
+		// }
+	}
+}
 /* Zephyr State Machine framework handlers */
 
 /* Function executed when the module enters the disconnected state. */
@@ -339,6 +413,7 @@ static void disconnected_run(void *o)
 		 * we cancel the connect work if it is onging.
 		 */
 		k_work_cancel_delayable(&connect_work);
+		k_work_cancel_delayable(&mqtt_pub_work);
 	}
 
 	if ((user_object->status == NETWORK_CONNECTED) && (user_object->chan == &NETWORK_CHAN))
@@ -369,6 +444,10 @@ static void connected_entry(void *o)
 	publish(&login_msg, login_topic, 50);
 
 	subscribe();
+	printf("LINE %d\r\n", __LINE__);
+
+	k_work_submit_to_queue(&transport_queue, &mqtt_pub_work);
+	printf("LINE %d\r\n", __LINE__);
 }
 
 /* Function executed when the module is in the connected state. */
@@ -385,6 +464,7 @@ static void connected_run(void *o)
 		(void)dynsec_mqtt_helper_disconnect();
 		return;
 	}
+	k_work_submit_to_queue(&transport_queue, &mqtt_pub_work);
 
 	if (user_object->chan != &MQTT_CHAN)
 	{
@@ -489,15 +569,47 @@ static void transport_task(void)
 				return;
 			}
 
-			s_obj.payload = payload;
+			if (k_msgq_put(&sensor_data_queue, &payload, K_NO_WAIT) != 0)
+			{
+				LOG_WRN("Queue is full, could not add sensor data.\n");
+			}
 
-			err = smf_run_state(SMF_CTX(&s_obj));
+			// s_obj.payload = payload;
+			// s_obj.topic = pub_topic;
+
+			// err = smf_run_state(SMF_CTX(&s_obj));
+			// if (err)
+			// {
+			// 	LOG_ERR("smf_run_state, error: %d", err);
+			// 	SEND_FATAL_ERROR();
+			// 	return;
+			// }
+		}
+		if (&GPS_CHAN == chan)
+		{
+			printf("LINE %d\r\n", __LINE__);
+			err = zbus_chan_read(&GPS_CHAN, &gps_data, K_SECONDS(1));
 			if (err)
 			{
-				LOG_ERR("smf_run_state, error: %d", err);
+				LOG_ERR("zbus_chan_read, error: %d", err);
 				SEND_FATAL_ERROR();
 				return;
 			}
+			printf("gps_data %d\r\n", gps_data.meas_id);
+			if (k_msgq_put(&gps_data_queue, &gps_data, K_NO_WAIT) != 0)
+			{
+				LOG_WRN("Queue is full, could not add GPS data.\n");
+			}
+			printf("LINE %d\r\n", __LINE__); // s_obj.payload = payload;
+											 // s_obj.topic = gps_pub_topic;
+
+			// err = smf_run_state(SMF_CTX(&s_obj));
+			// if (err)
+			// {
+			// 	LOG_ERR("smf_run_state, error: %d", err);
+			// 	SEND_FATAL_ERROR();
+			// 	return;
+			// }
 		}
 	}
 }

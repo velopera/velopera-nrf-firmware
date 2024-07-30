@@ -22,6 +22,8 @@ add_subdirectory(src/modules/fota)
 add_subdirectory(src/modules/network)
 add_subdirectory(src/modules/transport)
 add_subdirectory(src/modules/error)
+add_subdirectory(src/modules/location)
+
 
 include_directories(
         "${CMAKE_CURRENT_BINARY_DIR}/generated/"

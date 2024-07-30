@@ -45,7 +45,8 @@ static void uart_handler(const struct device *dev, void *data)
 	{
 		memset(payload.string, 0, sizeof(payload.string));
 		len = snprintk(payload.string, sizeof(payload.string), "%s", rx_buf);
-		LOG_INF("line %d  rxbufTail=%d rxbuf=%s", __LINE__, index, rx_buf);
+		//LOG_INF("line %d  rxbufTail=%d rxbuf=%s", __LINE__, index, rx_buf);
+		memset(rx_buf, 0, sizeof(rx_buf));
 
 		index = 0;
 	}
@@ -53,6 +54,7 @@ static void uart_handler(const struct device *dev, void *data)
 	{
 		rx_buf[index] = rx_byte;
 		index++;
+		// LOG_INF("line %d  rxbufTail=%d rxbuf=%s", __LINE__, index, rx_buf);
 	}
 	else
 	{
@@ -100,6 +102,7 @@ static void trigger_task(void)
 
 	while (true)
 	{
+		k_sem_take(&uart_sem, K_FOREVER); // take semaphore
 		if ((payload.string[0] != '\0' && strlen(payload.string) > 0))
 		{
 			err = zbus_chan_pub(&MQTT_CHAN, &payload, K_SECONDS(10));
@@ -109,8 +112,9 @@ static void trigger_task(void)
 				SEND_FATAL_ERROR();
 			}
 			memset(payload.string, 0, sizeof(payload.string));
+			LOG_INF("line %d",__LINE__);
 		}
-		k_sem_take(&uart_sem, K_FOREVER); // take semaphore
+		//k_sleep(K_MINUTES(1));
 	}
 }
 K_THREAD_DEFINE(trigger_task_id,

@@ -28,12 +28,12 @@ static void fota_dl_handler(const struct fota_download_evt *evt)
     switch (evt->id)
     {
     case FOTA_DOWNLOAD_EVT_ERROR:
-        printk("Received error from fota_download\n");
+        LOG_INF("Received error from fota_download\n");
         break;
 
     case FOTA_DOWNLOAD_EVT_FINISHED:
         fota_done();
-        printk("Press 'Reset' button or enter 'reset' to apply new firmware\n");
+        LOG_INF("Press 'Reset' button or enter 'reset' to apply new firmware\n");
         break;
 
     default:

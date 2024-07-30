@@ -14,12 +14,17 @@
 #include <modem/modem_key_mgmt.h>
 #include <modem/lte_lc.h>
 #include <modem/pdn.h>
+#include <nrf_modem_gnss.h>
 
 #include "message_channel.h"
 
 /* Register log module */
 LOG_MODULE_REGISTER(network, 4);
 char response[64];
+extern bool gnss_active;
+extern struct k_sem gnss_fix_sem;
+extern struct k_sem gnss_start_sem;
+K_SEM_DEFINE(lte_connected, 0, 1);
 
 /* This module does not subscribe to any channels */
 /* Value that holds the latest LTE network mode. */
@@ -88,6 +93,7 @@ static void lte_event_handler(const struct lte_lc_evt *const evt)
 		{
 			LOG_DBG("Network registration status: %s",
 					evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ? "Connected - home network" : "Connected - roaming");
+			k_sem_give(&lte_connected);
 		}
 
 		break;
@@ -194,6 +200,29 @@ void pdn_event_handler(uint8_t cid, enum pdn_event event, int reason)
 		SEND_FATAL_ERROR();
 	}
 }
+
+static int start_lte(void)
+{
+	int err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_NORMAL);
+	if (err)
+	{
+		LOG_ERR("Failed to activate LTE");
+		return err;
+	}
+	return 0;
+}
+
+static int stop_lte(void)
+{
+	int err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
+	if (err)
+	{
+		LOG_ERR("Failed to deactivate LTE");
+		return err;
+	}
+	return 0;
+}
+
 static void network_task(void)
 {
 	/* Initialize LTE Link Control library*/
@@ -245,8 +274,36 @@ static void network_task(void)
 		LOG_ERR("lte_lc_init_and_connect, error: %d", err);
 		SEND_FATAL_ERROR();
 	}
+	k_sem_give(&lte_connected);
+	err = stop_lte();
+	if (err)
+	{
+		LOG_ERR("Failed to deactivate LTE and enable GNSS functional mode");
+		return;
+	}
+	while (1)
+	{
+		k_sem_take(&gnss_fix_sem, K_FOREVER);
+		k_sleep(K_SECONDS(60));
+		gnss_active = false;
+		k_sem_give(&lte_connected);
 
-	k_sleep(K_SECONDS(300));
+		LOG_INF("Activating LTE for data transfer");
+		err = start_lte();
+		if (err)
+		{
+			LOG_ERR("Failed to activate LTE");
+			return;
+		}
+		k_sem_take(&gnss_start_sem, K_FOREVER);
+		err = stop_lte();
+		if (err)
+		{
+			LOG_ERR("Failed to deactivate LTE");
+			return;
+		}
+	}
+	// k_sleep(K_SECONDS(300));
 }
 
 K_THREAD_DEFINE(network_task_id,

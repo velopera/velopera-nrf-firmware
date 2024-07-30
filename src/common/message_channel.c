@@ -27,6 +27,14 @@ ZBUS_CHAN_DEFINE(MQTT_CHAN,
 				 ZBUS_OBSERVERS(transport),
 				 ZBUS_MSG_INIT(0));
 
+/* Define MQTT_CHAN */
+ZBUS_CHAN_DEFINE(GPS_CHAN,
+				 struct velopera_gps_data,
+				 NULL,
+				 NULL,
+				 ZBUS_OBSERVERS(transport),
+				 ZBUS_MSG_INIT(0));
+
 /* Define NETWORK_CHAN */
 ZBUS_CHAN_DEFINE(NETWORK_CHAN,
 				 enum network_status,
