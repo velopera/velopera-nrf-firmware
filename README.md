@@ -8,7 +8,7 @@ Project URL: [https://github.com/velopera/velopera-nrf-firmware](https://github.
 
 1. ## Installing the required development environment and downloading the example project
 
-After installing and starting the [nRF Connect Desktop](https://docs.google.com/document/d/1RdgDjMkioEuY_dKlOK0IRWg318wvAs84/edit#heading=h.1hmsyys), install the Toolchain Manager app. Open Toolchain Manager app and install the latest nRF Connect SDK. After installing the latest SDK [Visual Studio Code](https://docs.google.com/document/d/1RdgDjMkioEuY_dKlOK0IRWg318wvAs84/edit#heading=h.1hmsyys). Open Visual Studio Code and install [nRF Connect for VS Code Extension](https://docs.google.com/document/d/1RdgDjMkioEuY_dKlOK0IRWg318wvAs84/edit#heading=h.1hmsyys). Download the [example project](https://docs.google.com/document/d/1RdgDjMkioEuY_dKlOK0IRWg318wvAs84/edit#heading=h.1hmsyys).
+After installing and starting the [nRF Connect Desktop](https://docs.google.com/document/d/1RdgDjMkioEuY_dKlOK0IRWg318wvAs84/edit#heading=h.1hmsyys), install the Toolchain Manager app. Open Toolchain Manager app and install the latest nRF Connect SDK. After installing the latest SDK [Visual Studio Code](https://docs.google.com/document/d/1RdgDjMkioEuY_dKlOK0IRWg318wvAs84/edit#heading=h.1hmsyys). Open Visual Studio Code and install [nRF Connect for VS Code Extension](https://docs.google.com/document/d/1RdgDjMkioEuY_dKlOK0IRWg318wvAs84/edit#heading=h.1hmsyys).
 
 After installing the required development environment and downloading the example project we are ready to build and run the example project.
 
