@@ -65,3 +65,7 @@ https://infocenter.nordicsemi.com/topic/ref\_at\_commands/REF/at\_commands/intro
 - ### [nRF9160 SiP modem firmware](https://www.nordicsemi.com/Products/nRF9160/Download#infotabs:~:text=nRF9160%20SiP%20modem%20firmware%C2%A0,-Programming%20app%20available)
 
 https://www.nordicsemi.com/Products/nRF9160/Download#infotabs:\~:text=nRF9160%20SiP%20modem%20firmware%C2%A0,-Programming%20app%20available
+
+---
+
+*This work has received funding from the European Union’s Horizon 2020 research and innovation programme under grant agreement No. 101070599 (SecOPERA)*
