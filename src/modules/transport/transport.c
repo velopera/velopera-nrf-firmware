@@ -12,20 +12,17 @@
 #include "dynsec_mqtt_helper.h"
 #include "message_channel.h"
 #include <modem/modem_info.h>
-
-#include "firmware_version.h"
 extern char imei[16];
 
 uint8_t login_topic[50] = "";
+
+#define RSRP_PUBLISH_INTERVAL_SECONDS 30
 
 /* Register log module */
 LOG_MODULE_REGISTER(transport, 4);
 
 /* Register subscriber */
 ZBUS_SUBSCRIBER_DEFINE(transport, CONFIG_MQTT_SAMPLE_TRANSPORT_MESSAGE_QUEUE_SIZE);
-
-/* ID for subscribe topic - Used to verify that a subscription succeeded in on_mqtt_suback(). */
-#define SUBSCRIBE_TOPIC_ID 2469
 
 /* Forward declarations */
 static const struct smf_state state[];
@@ -36,9 +33,6 @@ static void mqtt_pub_work_fn(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(connect_work, connect_work_fn);
 static K_WORK_DELAYABLE_DEFINE(mqtt_pub_work, mqtt_pub_work_fn);
 
-K_MSGQ_DEFINE(gps_data_queue, sizeof(struct velopera_gps_data), 20, 4);
-K_MSGQ_DEFINE(sensor_data_queue, sizeof(struct velopera_payload), 20, 4);
-
 /* Define stack_area of application workqueue */
 K_THREAD_STACK_DEFINE(stack_area, CONFIG_MQTT_SAMPLE_TRANSPORT_WORKQUEUE_STACK_SIZE);
 
@@ -48,7 +42,6 @@ K_THREAD_STACK_DEFINE(stack_area, CONFIG_MQTT_SAMPLE_TRANSPORT_WORKQUEUE_STACK_S
 static struct k_work_q transport_queue;
 
 struct velopera_payload login_msg;
-struct velopera_gps_data gps_data;
 
 /* Internal states */
 enum module_state
@@ -56,12 +49,7 @@ enum module_state
 	MQTT_CONNECTED,
 	MQTT_DISCONNECTED
 };
-
 static uint8_t pub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_PUBLISH_TOPIC)];
-static uint8_t gps_pub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
-
-static uint8_t fota_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
-static uint8_t psk_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
 
 /* User defined state object.
  * Used to transfer data between state changes.
@@ -94,6 +82,7 @@ static struct s_object
 static void publish(struct velopera_payload *payload, uint8_t *topic, size_t topic_size)
 {
 	int err;
+	ARG_UNUSED(topic_size);
 
 	struct mqtt_publish_param param = {
 		.message.payload.data = payload->string,
@@ -117,46 +106,35 @@ static void publish(struct velopera_payload *payload, uint8_t *topic, size_t top
 			param.message.topic.topic.utf8);
 }
 
-static int modify_login_info_msg(char *msg, size_t msg_size)
+static int prepare_rsrp_payload(char *msg, size_t msg_size)
 {
 
 	struct modem_param_info modem_param;
-
-	int err = modem_info_init();
-	if (err)
-	{
-		LOG_ERR("Failed to initialize modem info: %d", err);
-	}
+	int err;
 
 	err = modem_info_params_init(&modem_param);
 	if (err)
 	{
-		LOG_ERR("Failed to initialize modem info: %d", err);
+		LOG_ERR("Failed to initialize modem params: %d", err);
+		return err;
 	}
 
 	err = modem_info_params_get(&modem_param);
 	if (err)
 	{
-		LOG_ERR("Failed to initialize modem info: %d", err);
+		LOG_ERR("Failed to read modem params: %d", err);
+		return err;
 	}
 
-	LOG_DBG("====== modify_login_info_msg ======");
-	err = snprintf(msg, msg_size, "{\"networkStatus\":\"online\",\"rsrp\":%d,\"iccid\":\"%s\",\"mcc\":\"%x\",\"mnc\":\"%s\",\"cid\":\"%s\",\"band\":\"%d\",\"areaCode\":\"%s\",\"op\":\"%s\",\"modem\":\"%s\",\"fw\":\"%s\"}",
-				   modem_param.network.rsrp.value, modem_param.sim.iccid.value_string,
-				   modem_param.network.mcc.value, modem_param.network.mnc.value_string,
-				   modem_param.network.cellid_hex.value_string, modem_param.network.current_band.value,
-				   modem_param.network.area_code.value_string, modem_param.network.current_operator.value_string,
-				   modem_param.device.modem_fw.value_string, getFirmwareVersion()->full);
+	err = snprintf(msg, msg_size, "{\"rsrp\":%d}", modem_param.network.rsrp.value);
 
-	if (err < 0)
+	if ((err < 0) || (err >= msg_size))
 	{
-		LOG_ERR("snprintf %d", err);
+		LOG_ERR("Failed to format rsrp payload: %d", err);
+		return -EMSGSIZE;
 	}
 
-	// LOG_INF("IP Address: %s", modem_param.network.ip_address.value_string);
-
-	LOG_DBG("msg (JSON): %s, size %d", msg, err);
-	LOG_DBG("===============================");
+	LOG_DBG("RSRP payload: %s", msg);
 	return err;
 }
 
@@ -180,40 +158,14 @@ static void on_mqtt_disconnect(int result)
 
 static void on_mqtt_publish(struct dynsec_mqtt_helper_buf topic, struct dynsec_mqtt_helper_buf payload)
 {
-	LOG_INF("Received payload: %.*s on topic: %.*s", payload.size,
-			payload.ptr,
-			topic.size,
-			topic.ptr);
-
-	if (strncmp(topic.ptr, fota_sub_topic, sizeof(fota_sub_topic)) == 0)
-	{
-		LOG_DBG("FOTA request received for firmware %s", payload.ptr);
-
-		int err = zbus_chan_pub(&FOTA_CHAN, &payload, K_SECONDS(1));
-		if (err)
-		{
-			LOG_ERR("zbus_chan_pub, error: %d", err);
-			SEND_FATAL_ERROR();
-		}
-
-		LOG_DBG("FOTA request redirected to FOTA_CHAN");
-	}
+	ARG_UNUSED(topic);
+	ARG_UNUSED(payload);
 }
 
 static void on_mqtt_suback(uint16_t message_id, int result)
 {
-	if ((message_id == SUBSCRIBE_TOPIC_ID) && (result == 0))
-	{
-		LOG_INF("Subscribed to topic %s and topic %s", fota_sub_topic, psk_sub_topic);
-	}
-	else if (result)
-	{
-		LOG_ERR("Topic subscription failed, error: %d", result);
-	}
-	else
-	{
-		LOG_WRN("Subscribed to unknown topic, id: %d", message_id);
-	}
+	ARG_UNUSED(message_id);
+	ARG_UNUSED(result);
 }
 
 /* Local convenience functions */
@@ -231,63 +183,7 @@ static int topics_prefix(void)
 		return -EMSGSIZE;
 	}
 
-	len = snprintk(gps_pub_topic, sizeof(gps_pub_topic), "ind/%s/gps", imei);
-	if ((len < 0) || (len >= sizeof(pub_topic)))
-	{
-		LOG_ERR("Publish topic buffer too small");
-		return -EMSGSIZE;
-	}
-
-	len = snprintk(fota_sub_topic, sizeof(fota_sub_topic), "cmd/%s/%s", imei,
-				   "fota");
-
-	if ((len < 0) || (len >= sizeof(fota_sub_topic)))
-	{
-		LOG_ERR("Subscribe topic buffer too small %d", __LINE__);
-		return -EMSGSIZE;
-	}
-	len = snprintk(psk_sub_topic, sizeof(psk_sub_topic), "cmd/%s/%s", imei,
-				   "psk");
-
-	if ((len < 0) || (len >= sizeof(psk_sub_topic)))
-	{
-		LOG_ERR("Subscribe topic buffer too small %d", __LINE__);
-		return -EMSGSIZE;
-	}
-
 	return 0;
-}
-
-static void subscribe(void)
-{
-	int err;
-	struct mqtt_topic topics[] = {
-		{
-			.topic.utf8 = fota_sub_topic,
-			.topic.size = strlen(fota_sub_topic),
-		},
-		{
-			.topic.utf8 = psk_sub_topic,
-			.topic.size = strlen(psk_sub_topic),
-		},
-	};
-	struct mqtt_subscription_list list = {
-		.list = topics,
-		.list_count = ARRAY_SIZE(topics),
-		.message_id = SUBSCRIBE_TOPIC_ID,
-	};
-
-	for (size_t i = 0; i < list.list_count; i++)
-	{
-		LOG_INF("Subscribing to: %s", (char *)list.list[i].topic.utf8);
-	}
-
-	err = dynsec_mqtt_helper_subscribe(&list);
-	if (err)
-	{
-		LOG_ERR("Failed to subscribe to topics, error: %d", err);
-		return;
-	}
 }
 
 /* Connect work - Used to establish a connection to the MQTT broker and schedule reconnection
@@ -307,8 +203,8 @@ static void connect_work_fn(struct k_work *work)
 		.device_id.size = strlen(imei),
 		.password.ptr = imei, // TODO: for now!
 		.password.size = strlen(imei),
-		.last_will_message.ptr = "{\"networkStatus\":\"offline\"}",
-		.last_will_message.size = strlen("{\"networkStatus\":\"offline\"}"),
+		.last_will_message.ptr = "{\"rsrp\":null}",
+		.last_will_message.size = strlen("{\"rsrp\":null}"),
 	};
 	err = snprintf(login_topic, sizeof(login_topic), "ind/%s/login", imei);
 	err = topics_prefix();
@@ -331,60 +227,23 @@ static void connect_work_fn(struct k_work *work)
 }
 void mqtt_pub_work_fn(struct k_work *work)
 {
-	struct velopera_gps_data gps_data;
-	struct velopera_payload payload;
+	ARG_UNUSED(work);
+	struct velopera_payload payload = {0};
 	int err;
-	printf("%d \r\n", __LINE__);
-	while (k_msgq_get(&gps_data_queue, &gps_data, K_NO_WAIT) == 0)
+
+	err = prepare_rsrp_payload(payload.string, sizeof(payload.string));
+	if (err < 0)
 	{
-		sprintf(payload.string, GNSS_DATA_JSON,
-				gps_data.pvt.latitude,
-				gps_data.pvt.longitude,
-				gps_data.pvt.altitude,
-				gps_data.pvt.accuracy,
-				gps_data.pvt.speed,
-				gps_data.pvt.speed_accuracy,
-				gps_data.pvt.heading,
-				gps_data.pvt.datetime.year,
-				gps_data.pvt.datetime.month,
-				gps_data.pvt.datetime.day,
-				gps_data.pvt.datetime.hour,
-				gps_data.pvt.datetime.minute,
-				gps_data.pvt.datetime.seconds,
-				gps_data.pvt.datetime.ms,
-				gps_data.pvt.pdop,
-				gps_data.pvt.hdop,
-				gps_data.pvt.vdop,
-				gps_data.pvt.tdop,
-				gps_data.meas_id);
-
-		printf("%s\n", payload.string);
-
-		publish(&payload, gps_pub_topic, sizeof(gps_pub_topic));
-		// int err = smf_run_state(SMF_CTX(&s_obj));
-		// if (err)
-		// {
-		// 	LOG_ERR("smf_run_state, error: %d", err);
-		// 	SEND_FATAL_ERROR();
-		// 	return;
-		// }
+		LOG_ERR("prepare_rsrp_payload, error: %d", err);
 	}
-	while (k_msgq_get(&sensor_data_queue, &payload, K_NO_WAIT) == 0)
+	else
 	{
-
-		printf("%s\n", payload.string);
-
-		s_obj.payload = payload;
-		s_obj.topic = pub_topic;
 		publish(&payload, pub_topic, sizeof(pub_topic));
-		// err = smf_run_state(SMF_CTX(&s_obj));
-		// if (err)
-		// {
-		// 	LOG_ERR("smf_run_state, error: %d", err);
-		// 	SEND_FATAL_ERROR();
-		// 	return;
-		// }
 	}
+
+	k_work_reschedule_for_queue(&transport_queue,
+							&mqtt_pub_work,
+							K_SECONDS(RSRP_PUBLISH_INTERVAL_SECONDS));
 }
 /* Zephyr State Machine framework handlers */
 
@@ -440,14 +299,7 @@ static void connected_entry(void *o)
 
 	/* Cancel any ongoing connect work when we enter connected state */
 	k_work_cancel_delayable(&connect_work);
-
-	publish(&login_msg, login_topic, 50);
-
-	subscribe();
-	printf("LINE %d\r\n", __LINE__);
-
-	k_work_submit_to_queue(&transport_queue, &mqtt_pub_work);
-	printf("LINE %d\r\n", __LINE__);
+	k_work_reschedule_for_queue(&transport_queue, &mqtt_pub_work, K_NO_WAIT);
 }
 
 /* Function executed when the module is in the connected state. */
@@ -464,14 +316,10 @@ static void connected_run(void *o)
 		(void)dynsec_mqtt_helper_disconnect();
 		return;
 	}
-	k_work_submit_to_queue(&transport_queue, &mqtt_pub_work);
-
-	if (user_object->chan != &MQTT_CHAN)
+	if (user_object->chan == &MQTT_CHAN)
 	{
-		return;
+		LOG_DBG("MQTT_CHAN payload ignored in benchmark mode");
 	}
-
-	publish(&user_object->payload, user_object->topic, sizeof(user_object->topic));
 }
 
 /* Function executed when the module exits the connected state. */
@@ -479,6 +327,7 @@ static void connected_exit(void *o)
 {
 	ARG_UNUSED(o);
 
+	k_work_cancel_delayable(&mqtt_pub_work);
 	LOG_INF("Disconnected from MQTT broker");
 }
 
@@ -491,12 +340,10 @@ static const struct smf_state state[] = {
 static void transport_task(void)
 {
 	int err;
-	static bool certs_added;
 	LOG_INF("Transport task startup LINE %d", __LINE__);
 
 	const struct zbus_channel *chan;
 	enum network_status status;
-	struct velopera_payload payload;
 	struct dynsec_mqtt_helper_cfg cfg = {
 		.cb = {
 			.on_connack = on_mqtt_connack,
@@ -505,8 +352,6 @@ static void transport_task(void)
 			.on_suback = on_mqtt_suback,
 		},
 	};
-
-	s_obj.topic = pub_topic;
 
 	/* Initialize and start application workqueue.
 	 * This workqueue can be used to offload tasks and/or as a timer when wanting to
@@ -522,6 +367,14 @@ static void transport_task(void)
 	if (err)
 	{
 		LOG_ERR("dynsec_mqtt_helper_init, error: %d", err);
+		SEND_FATAL_ERROR();
+		return;
+	}
+
+	err = modem_info_init();
+	if (err)
+	{
+		LOG_ERR("modem_info_init, error: %d", err);
 		SEND_FATAL_ERROR();
 		return;
 	}
@@ -545,8 +398,6 @@ static void transport_task(void)
 				return;
 			}
 
-			err = modify_login_info_msg(login_msg.string, sizeof(login_msg.string));
-
 			s_obj.status = status;
 
 			err = smf_run_state(SMF_CTX(&s_obj));
@@ -560,56 +411,15 @@ static void transport_task(void)
 
 		if (&MQTT_CHAN == chan)
 		{
-
-			err = zbus_chan_read(&MQTT_CHAN, &payload, K_SECONDS(1));
+			struct velopera_payload ignored_payload;
+			err = zbus_chan_read(&MQTT_CHAN, &ignored_payload, K_SECONDS(1));
 			if (err)
 			{
 				LOG_ERR("zbus_chan_read, error: %d", err);
 				SEND_FATAL_ERROR();
 				return;
 			}
-
-			if (k_msgq_put(&sensor_data_queue, &payload, K_NO_WAIT) != 0)
-			{
-				LOG_WRN("Queue is full, could not add sensor data.\n");
-			}
-
-			// s_obj.payload = payload;
-			// s_obj.topic = pub_topic;
-
-			// err = smf_run_state(SMF_CTX(&s_obj));
-			// if (err)
-			// {
-			// 	LOG_ERR("smf_run_state, error: %d", err);
-			// 	SEND_FATAL_ERROR();
-			// 	return;
-			// }
-		}
-		if (&GPS_CHAN == chan)
-		{
-			printf("LINE %d\r\n", __LINE__);
-			err = zbus_chan_read(&GPS_CHAN, &gps_data, K_SECONDS(1));
-			if (err)
-			{
-				LOG_ERR("zbus_chan_read, error: %d", err);
-				SEND_FATAL_ERROR();
-				return;
-			}
-			printf("gps_data %d\r\n", gps_data.meas_id);
-			if (k_msgq_put(&gps_data_queue, &gps_data, K_NO_WAIT) != 0)
-			{
-				LOG_WRN("Queue is full, could not add GPS data.\n");
-			}
-			printf("LINE %d\r\n", __LINE__); // s_obj.payload = payload;
-											 // s_obj.topic = gps_pub_topic;
-
-			// err = smf_run_state(SMF_CTX(&s_obj));
-			// if (err)
-			// {
-			// 	LOG_ERR("smf_run_state, error: %d", err);
-			// 	SEND_FATAL_ERROR();
-			// 	return;
-			// }
+			LOG_DBG("Ignored MQTT_CHAN payload in benchmark mode");
 		}
 	}
 }

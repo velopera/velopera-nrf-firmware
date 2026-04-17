@@ -8,6 +8,7 @@
 
 
 &led0 {
+	status = "okay";
 	gpios = <&gpio0 26 0>;
 };
 

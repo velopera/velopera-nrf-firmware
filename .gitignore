@@ -57,3 +57,7 @@ dkms.conf
 
 # build
 /build*/
+
+#sboms
+*sbom*
+*.spdx

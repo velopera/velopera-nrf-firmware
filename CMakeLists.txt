@@ -17,12 +17,10 @@ include(GenerateExportHeader)
 add_subdirectory(src/common)
 
 # Include mandatory module source folders
-add_subdirectory(src/modules/trigger)
 add_subdirectory(src/modules/fota)
 add_subdirectory(src/modules/network)
 add_subdirectory(src/modules/transport)
 add_subdirectory(src/modules/error)
-add_subdirectory(src/modules/location)
 
 
 include_directories(

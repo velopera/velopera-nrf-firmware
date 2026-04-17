@@ -13,6 +13,7 @@
 #include <modem/lte_lc.h>
 #include <modem/nrf_modem_lib.h>
 #include <nrf_modem_gnss.h>
+#include <zephyr/drivers/gpio.h>
 
 #include "message_channel.h"
 
@@ -20,8 +21,11 @@
 LOG_MODULE_REGISTER(location_app, 4);
 
 extern struct k_sem lte_connected;
+extern int stop_lte(void);
+
 K_SEM_DEFINE(gnss_fix_sem, 0, 1);
 K_SEM_DEFINE(gnss_start_sem, 0, 1);
+const struct gpio_dt_spec usr_led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 
 struct velopera_gps_data velo_gps_data;
 bool gnss_active;
@@ -110,6 +114,8 @@ static void gnss_event_handler(int event)
 		break;
 	case NRF_MODEM_GNSS_EVT_SLEEP_AFTER_TIMEOUT:
 		LOG_INF("GNSS enters sleep because fix retry timeout was reached\n\r");
+		k_sem_give(&lte_connected);
+		zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
 		break;
 	default:
 
@@ -157,6 +163,7 @@ static int gnss_init_and_start(void)
 		LOG_ERR("Failed to start GNSS");
 		return -1;
 	}
+
 	if (nrf_modem_gnss_prio_mode_enable() != 0)
 	{
 		LOG_ERR("Error setting GNSS priority mode");
@@ -176,13 +183,14 @@ static void stop_gnss(void)
 static void location_task(void)
 {
 	int err;
+	gpio_pin_set_dt(&usr_led, 0);
 
 	/* Wait untill first LTE connection */
-	while (k_sem_take(&lte_connected, K_FOREVER))
+	while (k_sem_take(&gnss_start_sem, K_FOREVER))
 	{
 	}
 	LOG_INF("Deactivating LTE for first GNSS fix");
-
+	stop_lte();
 	gnss_init_and_start();
 	struct velopera_gps_data velo_gps_test_data;
 
@@ -191,23 +199,45 @@ static void location_task(void)
 
 		while (gnss_active)
 		{
-			k_sem_take(&gnss_fix_sem, K_FOREVER);
-			zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
-			velo_gps_data.meas_id++;
-			LOG_INF("gps data published to be added in queue");
+			/* Start a 60-second timer for GNSS fix */
+			int ret = k_sem_take(&gnss_fix_sem, K_SECONDS(300));
+
+			if (ret == 0)
+			{
+				/* GNSS fix obtained */
+				LOG_INF("GNSS fix obtained");
+				zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
+				velo_gps_data.meas_id++;
+				LOG_INF("GPS data published");
+
+				gpio_pin_set_dt(&usr_led, 1);
+				k_sleep(K_SECONDS(2.5));
+				gpio_pin_set_dt(&usr_led, 0);
+				k_sleep(K_SECONDS(2.5));
+			}
+			else if (ret == -EAGAIN)
+			{
+				/* GNSS fix timeout - enable LTE */
+				LOG_INF("GNSS fix timeout, enabling LTE...");
+				stop_gnss();
+				gnss_active = false;
+				k_sem_give(&lte_connected);
+			}
 		}
-		// k_sleep(K_SECONDS(60));
-		k_sem_take(&lte_connected, K_FOREVER);
-		LOG_INF("GNSS was active for %d seconds", 60);
 
-		stop_gnss();
+		/* Wait before trying GNSS again */
+		// k_sleep(K_SECONDS(180));
 
-		k_sleep(K_SECONDS(60));
-
-		k_sem_give(&gnss_start_sem);
+		/* Restart GNSS */
+		int ret = k_sem_take(&gnss_start_sem, K_FOREVER);
 		LOG_INF("Reactivating GNSS");
-
-		gnss_init_and_start();
+		stop_lte();
+		if (nrf_modem_gnss_start() != 0)
+		{
+			LOG_ERR("Failed to start GNSS");
+			return;
+		}
+		gnss_active = true;
 
 		// for (int i = 0; i < 4; i++)
 		// {

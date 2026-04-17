@@ -14,16 +14,12 @@
 #include <modem/modem_key_mgmt.h>
 #include <modem/lte_lc.h>
 #include <modem/pdn.h>
-#include <nrf_modem_gnss.h>
 
 #include "message_channel.h"
 
 /* Register log module */
 LOG_MODULE_REGISTER(network, 4);
 char response[64];
-extern bool gnss_active;
-extern struct k_sem gnss_fix_sem;
-extern struct k_sem gnss_start_sem;
 K_SEM_DEFINE(lte_connected, 0, 1);
 
 /* This module does not subscribe to any channels */
@@ -212,7 +208,7 @@ static int start_lte(void)
 	return 0;
 }
 
-static int stop_lte(void)
+int stop_lte(void)
 {
 	int err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_DEACTIVATE_LTE);
 	if (err)
@@ -274,34 +270,38 @@ static void network_task(void)
 		LOG_ERR("lte_lc_init_and_connect, error: %d", err);
 		SEND_FATAL_ERROR();
 	}
-	k_sem_give(&lte_connected);
-	err = stop_lte();
-	if (err)
-	{
-		LOG_ERR("Failed to deactivate LTE and enable GNSS functional mode");
-		return;
-	}
+	//k_sem_give(&lte_connected);
+	//err = stop_lte();
 	while (1)
 	{
-		k_sem_take(&gnss_fix_sem, K_FOREVER);
-		k_sleep(K_SECONDS(60));
-		gnss_active = false;
-		k_sem_give(&lte_connected);
+		int ret = k_sem_take(&lte_connected, K_FOREVER);
+		ARG_UNUSED(ret);
+		// if (ret == 0)
+		// {
+			LOG_INF("LINE %d", __LINE__);
+			LOG_INF("Activating LTE for data transfer");
+			err = start_lte();
+			if (err)
+			{
+				LOG_ERR("Failed to activate LTE");
+				return;
+			}
+			LOG_INF("LINE %d", __LINE__);
+		// }
+		// else
+		// { // check for gnss start semaphore
+		// 	if (k_sem_take(&gnss_start_sem, K_FOREVER) == 0)
+		// 	{
+		// 		LOG_INF("LINE %d", __LINE__);
 
-		LOG_INF("Activating LTE for data transfer");
-		err = start_lte();
-		if (err)
-		{
-			LOG_ERR("Failed to activate LTE");
-			return;
-		}
-		k_sem_take(&gnss_start_sem, K_FOREVER);
-		err = stop_lte();
-		if (err)
-		{
-			LOG_ERR("Failed to deactivate LTE");
-			return;
-		}
+		// 		err = stop_lte();
+		// 		if (err)
+		// 		{
+		// 			LOG_ERR("Failed to deactivate LTE");
+		// 			return;
+		// 		}
+		// 	}
+		// }
 	}
 	// k_sleep(K_SECONDS(300));
 }
