@@ -14,6 +14,7 @@ config MQTT_SAMPLE_PAYLOAD_CHANNEL_STRING_MAX_SIZE
 
 rsource "src/modules/trigger/Kconfig.trigger"
 rsource "src/modules/network/Kconfig.network"
+rsource "src/modules/location/Kconfig.location"
 rsource "src/modules/transport/Kconfig.transport"
 rsource "src/modules/error/Kconfig.error"
 rsource "src/modules/transport/mqtt_helper/Kconfig.mqtt"

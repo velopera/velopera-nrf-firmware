@@ -8,6 +8,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/zbus/zbus.h>
 #include <zephyr/drivers/uart.h>
+#include <stdbool.h>
+#include <string.h>
 
 #if CONFIG_DK_LIBRARY
 #include <dk_buttons_and_leds.h>
@@ -30,39 +32,150 @@ static const struct device *const dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
 /* Register log module */
 LOG_MODULE_REGISTER(trigger, CONFIG_MQTT_SAMPLE_TRIGGER_LOG_LEVEL);
 struct velopera_payload payload = {0};
-int len;
 static struct k_sem uart_sem; // created semaphore
 uint8_t rx_byte;
 char rx_buf[RX_BUF_SIZE];
 static int index = 0;
+
+static bool is_whitespace(char c)
+{
+	return (c == ' ') || (c == '\t') || (c == '\r') || (c == '\n');
+}
+
+static bool is_json_object(const char *input)
+{
+	if (input == NULL)
+	{
+		return false;
+	}
+
+	size_t len = strlen(input);
+	size_t start = 0;
+	size_t end = len;
+
+	while ((start < len) && is_whitespace(input[start]))
+	{
+		start++;
+	}
+
+	while ((end > start) && is_whitespace(input[end - 1]))
+	{
+		end--;
+	}
+
+	if ((end - start) < 2)
+	{
+		return false;
+	}
+
+	if ((input[start] != '{') || (input[end - 1] != '}'))
+	{
+		return false;
+	}
+
+	bool in_string = false;
+	bool escape = false;
+	int object_depth = 0;
+	int array_depth = 0;
+
+	for (size_t i = start; i < end; i++)
+	{
+		char c = input[i];
+
+		if (in_string)
+		{
+			if (escape)
+			{
+				escape = false;
+			}
+			else if (c == '\\')
+			{
+				escape = true;
+			}
+			else if (c == '"')
+			{
+				in_string = false;
+			}
+
+			continue;
+		}
+
+		switch (c)
+		{
+		case '"':
+			in_string = true;
+			break;
+		case '{':
+			object_depth++;
+			break;
+		case '}':
+			if (object_depth == 0)
+			{
+				return false;
+			}
+
+			object_depth--;
+			if ((object_depth == 0) && (i != (end - 1)))
+			{
+				return false;
+			}
+			break;
+		case '[':
+			array_depth++;
+			break;
+		case ']':
+			if (array_depth == 0)
+			{
+				return false;
+			}
+
+			array_depth--;
+			break;
+		default:
+			break;
+		}
+	}
+
+	return (!in_string && !escape && (object_depth == 0) && (array_depth == 0));
+}
+
 static void uart_handler(const struct device *dev, void *data)
 {
+	ARG_UNUSED(data);
 
-	int err;
-	uart_fifo_read(dev, &rx_byte, 1);
-
-	if (rx_byte == '\n')
+	if (!uart_irq_update(dev) || !uart_irq_rx_ready(dev))
 	{
-		memset(payload.string, 0, sizeof(payload.string));
-		len = snprintk(payload.string, sizeof(payload.string), "%s", rx_buf);
-		//LOG_INF("line %d  rxbufTail=%d rxbuf=%s", __LINE__, index, rx_buf);
-		memset(rx_buf, 0, sizeof(rx_buf));
-
-		index = 0;
-	}
-	else if (index < RX_BUF_SIZE - 1)
-	{
-		rx_buf[index] = rx_byte;
-		index++;
-		// LOG_INF("line %d  rxbufTail=%d rxbuf=%s", __LINE__, index, rx_buf);
-	}
-	else
-	{
-		LOG_ERR("UART RX ERROR");
-		SEND_FATAL_ERROR();
+		return;
 	}
 
-	k_sem_give(&uart_sem); // release semaphore for sleep mode
+	while (uart_fifo_read(dev, &rx_byte, 1) == 1)
+	{
+		if ((rx_byte == '\n') || (rx_byte == '\r'))
+		{
+			/* Accept both CR and LF line endings; ignore empty delimiters. */
+			if (index > 0)
+			{
+				memset(payload.string, 0, sizeof(payload.string));
+				snprintk(payload.string, sizeof(payload.string), "%s", rx_buf);
+				memset(rx_buf, 0, sizeof(rx_buf));
+				index = 0;
+				k_sem_give(&uart_sem); // release semaphore when a full line arrives
+			}
+
+			continue;
+		}
+
+		if (index < RX_BUF_SIZE - 1)
+		{
+			rx_buf[index] = rx_byte;
+			index++;
+		}
+		else
+		{
+			LOG_ERR("UART RX ERROR");
+			SEND_FATAL_ERROR();
+		}
+	}
 }
 
 static int uart_init(void)
@@ -73,6 +186,8 @@ static int uart_init(void)
 		LOG_ERR("%s device not ready", dev->name);
 		return -ENODEV;
 	}
+
+	LOG_INF("Trigger UART ready on %s", dev->name);
 
 	uart_irq_callback_user_data_set(dev, uart_handler, NULL);
 
@@ -90,7 +205,6 @@ static int uart_init(void)
 	return 0;
 }
 
-char *message_payload;
 static void trigger_task(void)
 {
 	int err = uart_init();
@@ -105,6 +219,13 @@ static void trigger_task(void)
 		k_sem_take(&uart_sem, K_FOREVER); // take semaphore
 		if ((payload.string[0] != '\0' && strlen(payload.string) > 0))
 		{
+			if (!is_json_object(payload.string))
+			{
+				LOG_WRN("Dropped non-JSON UART payload");
+				memset(payload.string, 0, sizeof(payload.string));
+				continue;
+			}
+
 			err = zbus_chan_pub(&MQTT_CHAN, &payload, K_SECONDS(10));
 			if (err)
 			{
@@ -112,7 +233,7 @@ static void trigger_task(void)
 				SEND_FATAL_ERROR();
 			}
 			memset(payload.string, 0, sizeof(payload.string));
-			LOG_INF("line %d",__LINE__);
+			LOG_DBG("Forwarded UART JSON payload to MQTT channel");
 		}
 		//k_sleep(K_MINUTES(1));
 	}

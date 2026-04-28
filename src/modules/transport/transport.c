@@ -333,8 +333,7 @@ void mqtt_pub_work_fn(struct k_work *work)
 {
 	struct velopera_gps_data gps_data;
 	struct velopera_payload payload;
-	int err;
-	printf("%d \r\n", __LINE__);
+	ARG_UNUSED(work);
 	while (k_msgq_get(&gps_data_queue, &gps_data, K_NO_WAIT) == 0)
 	{
 		sprintf(payload.string, GNSS_DATA_JSON,
@@ -358,7 +357,7 @@ void mqtt_pub_work_fn(struct k_work *work)
 				gps_data.pvt.tdop,
 				gps_data.meas_id);
 
-		printf("%s\n", payload.string);
+		LOG_DBG("Publishing GPS payload from queue");
 
 		publish(&payload, gps_pub_topic, sizeof(gps_pub_topic));
 		// int err = smf_run_state(SMF_CTX(&s_obj));
@@ -372,7 +371,7 @@ void mqtt_pub_work_fn(struct k_work *work)
 	while (k_msgq_get(&sensor_data_queue, &payload, K_NO_WAIT) == 0)
 	{
 
-		printf("%s\n", payload.string);
+		LOG_DBG("Publishing UART payload from queue");
 
 		s_obj.payload = payload;
 		s_obj.topic = pub_topic;
@@ -444,10 +443,8 @@ static void connected_entry(void *o)
 	publish(&login_msg, login_topic, 50);
 
 	subscribe();
-	printf("LINE %d\r\n", __LINE__);
 
 	k_work_submit_to_queue(&transport_queue, &mqtt_pub_work);
-	printf("LINE %d\r\n", __LINE__);
 }
 
 /* Function executed when the module is in the connected state. */
@@ -587,7 +584,6 @@ static void transport_task(void)
 		}
 		if (&GPS_CHAN == chan)
 		{
-			printf("LINE %d\r\n", __LINE__);
 			err = zbus_chan_read(&GPS_CHAN, &gps_data, K_SECONDS(1));
 			if (err)
 			{
@@ -595,13 +591,13 @@ static void transport_task(void)
 				SEND_FATAL_ERROR();
 				return;
 			}
-			printf("gps_data %d\r\n", gps_data.meas_id);
+			LOG_DBG("GPS data meas_id=%d", gps_data.meas_id);
 			if (k_msgq_put(&gps_data_queue, &gps_data, K_NO_WAIT) != 0)
 			{
 				LOG_WRN("Queue is full, could not add GPS data.\n");
 			}
-			printf("LINE %d\r\n", __LINE__); // s_obj.payload = payload;
-											 // s_obj.topic = gps_pub_topic;
+			// s_obj.payload = payload;
+			// s_obj.topic = gps_pub_topic;
 
 			// err = smf_run_state(SMF_CTX(&s_obj));
 			// if (err)

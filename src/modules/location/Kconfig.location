@@ -1,0 +1,23 @@
+#
+# Copyright (c) 2023 Nordic Semiconductor
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+menu "Location"
+
+config MQTT_SAMPLE_LOCATION_THREAD_STACK_SIZE
+	int "Thread stack size"
+	default 4096
+
+config MQTT_SAMPLE_LOCATION_GNSS_SLEEP_SECONDS
+	int "GNSS sleep period in seconds"
+	default 300
+	help
+	  Time spent with GNSS stopped before it is re-enabled.
+
+module = MQTT_SAMPLE_LOCATION
+module-str = Location
+source "subsys/logging/Kconfig.template.log_config"
+
+endmenu # Location

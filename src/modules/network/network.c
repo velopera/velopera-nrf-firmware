@@ -32,47 +32,58 @@ static enum lte_lc_lte_mode nw_mode_latest;
 
 static void print_modem_status(void)
 {
-	char response[64];
+	char response[64] = {0};
 
 	int err = nrf_modem_at_cmd(response,
 							   sizeof(response), "AT+CPAS");
 
 	if (err)
 	{
-		LOG_ERR("ERR nrf_modem_at_cmd device activity status %d \r\n", err);
+		LOG_WRN("AT+CPAS failed: %d", err);
+	}
+	else
+	{
+		LOG_DBG("AT+CPAS: %s", response);
 	}
 
-	LOG_DBG("Device activity status: %s \r\n", response);
-
+	memset(response, 0, sizeof(response));
 	err = nrf_modem_at_cmd(response,
 						   sizeof(response), "AT+CFUN?");
 
 	if (err)
 	{
-		LOG_ERR("ERR nrf_modem_at_cmd device activity status %d \r\n", err);
+		LOG_WRN("AT+CFUN? failed: %d", err);
+	}
+	else
+	{
+		LOG_DBG("AT+CFUN?: %s", response);
 	}
 
-	LOG_DBG("Device activity status: %s \r\n", response);
-
+	memset(response, 0, sizeof(response));
 	err = nrf_modem_at_cmd(response,
 						   sizeof(response), "AT+CEMODE?");
 
 	if (err)
 	{
-		LOG_ERR("ERR nrf_modem_at_cmd device mode %d \r\n", err);
+		LOG_WRN("AT+CEMODE? failed: %d", err);
+	}
+	else
+	{
+		LOG_INF("AT+CEMODE?: %s", response);
 	}
 
-	LOG_INF("Device activity status: %s \r\n", response);
-
+	memset(response, 0, sizeof(response));
 	err = nrf_modem_at_cmd(response,
 						   sizeof(response), "AT%%XSYSTEMMODE?");
 
 	if (err)
 	{
-		LOG_ERR("ERR nrf_modem_at_cmd device mode %d \r\n", err);
+		LOG_WRN("AT%%XSYSTEMMODE? failed: %d", err);
 	}
-
-	LOG_DBG("Device activity status: %s \r\n", response);
+	else
+	{
+		LOG_DBG("AT%%XSYSTEMMODE?: %s", response);
+	}
 }
 
 /* Handler that is used to notify the application about LTE link specific events. */
@@ -172,6 +183,7 @@ void pdn_event_handler(uint8_t cid, enum pdn_event event, int reason)
 	{
 		LOG_INF("PDN connection activated, IPv4 up");
 		status = NETWORK_CONNECTED;
+		k_sem_give(&lte_connected);
 
 		break;
 	}
@@ -225,14 +237,7 @@ static int stop_lte(void)
 
 static void network_task(void)
 {
-	/* Initialize LTE Link Control library*/
-	int err = lte_lc_init();
-
-	if (err)
-	{
-		LOG_ERR("lte_lc_init, error: %d", err);
-		return err;
-	}
+	int err;
 
 	/* Setup a callback for the default PDP context. */
 	err = pdn_default_ctx_cb_reg(pdn_event_handler);
@@ -244,37 +249,28 @@ static void network_task(void)
 		return;
 	}
 
-	/* Subscribe to modem domain events (AT%MDMEV).
-	 * Modem domain events is received in the lte_event_handler().
-	 *
-	 * This function fails for modem firmware versions < 1.3.0 due to not being supported.
-	 * Therefore we ignore its return value.
-	 */
-
-	(void)lte_lc_modem_events_enable();
-
-	err = lte_lc_psm_req(true);
-
+	LOG_INF("Bringing interfaces up...");
+	err = conn_mgr_all_if_up(true);
 	if (err)
 	{
-		LOG_ERR("lte_lc_psm_req, error: %d", err);
+		LOG_ERR("conn_mgr_all_if_up, error: %d", err);
 		SEND_FATAL_ERROR();
+		return;
 	}
 
+	LOG_INF("Connecting LTE via conn_mgr...");
+	err = conn_mgr_all_if_connect(true);
+	if (err)
+	{
+		LOG_ERR("conn_mgr_all_if_connect, error: %d", err);
+		SEND_FATAL_ERROR();
+		return;
+	}
+
+	/* Wait for first LTE registration before switching to GNSS. */
+	k_sem_take(&lte_connected, K_FOREVER);
 	print_modem_status();
 
-	LOG_INF("Connecting to LTE...");
-
-	/* Initialize the link controller and connect to LTE network.
-	 * Register handler to receive LTE link specific events.
-	 */
-	err = lte_lc_connect_async(lte_event_handler);
-	if (err)
-	{
-		LOG_ERR("lte_lc_init_and_connect, error: %d", err);
-		SEND_FATAL_ERROR();
-	}
-	k_sem_give(&lte_connected);
 	err = stop_lte();
 	if (err)
 	{
@@ -284,7 +280,7 @@ static void network_task(void)
 	while (1)
 	{
 		k_sem_take(&gnss_fix_sem, K_FOREVER);
-		k_sleep(K_SECONDS(60));
+		k_sleep(K_SECONDS(CONFIG_MQTT_SAMPLE_NETWORK_GNSS_ACTIVE_SECONDS));
 		gnss_active = false;
 		k_sem_give(&lte_connected);
 

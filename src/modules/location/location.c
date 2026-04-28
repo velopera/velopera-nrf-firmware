@@ -17,7 +17,7 @@
 #include "message_channel.h"
 
 /* Register log module */
-LOG_MODULE_REGISTER(location_app, 4);
+LOG_MODULE_REGISTER(location_app, CONFIG_MQTT_SAMPLE_LOCATION_LOG_LEVEL);
 
 extern struct k_sem lte_connected;
 K_SEM_DEFINE(gnss_fix_sem, 0, 1);
@@ -198,11 +198,11 @@ static void location_task(void)
 		}
 		// k_sleep(K_SECONDS(60));
 		k_sem_take(&lte_connected, K_FOREVER);
-		LOG_INF("GNSS was active for %d seconds", 60);
+		LOG_INF("GNSS sleep for %d seconds", CONFIG_MQTT_SAMPLE_LOCATION_GNSS_SLEEP_SECONDS);
 
 		stop_gnss();
 
-		k_sleep(K_SECONDS(60));
+		k_sleep(K_SECONDS(CONFIG_MQTT_SAMPLE_LOCATION_GNSS_SLEEP_SECONDS));
 
 		k_sem_give(&gnss_start_sem);
 		LOG_INF("Reactivating GNSS");
@@ -242,5 +242,5 @@ static void location_task(void)
 }
 
 K_THREAD_DEFINE(location_task_id,
-				4096,
+				CONFIG_MQTT_SAMPLE_LOCATION_THREAD_STACK_SIZE,
 				location_task, NULL, NULL, NULL, 3, 0, 0);

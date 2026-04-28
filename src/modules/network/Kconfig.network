@@ -11,6 +11,12 @@ config MQTT_SAMPLE_NETWORK_THREAD_STACK_SIZE
 	int "Thread stack size"
 	default 4096
 
+config MQTT_SAMPLE_NETWORK_GNSS_ACTIVE_SECONDS
+	int "GNSS active period in seconds"
+	default 30
+	help
+	  Time spent in GNSS mode after a fix before LTE transfer is re-enabled.
+
 module = MQTT_SAMPLE_NETWORK
 module-str = Network
 source "subsys/logging/Kconfig.template.log_config"
