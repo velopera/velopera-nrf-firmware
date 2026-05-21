@@ -25,6 +25,7 @@ extern bool gnss_active;
 extern struct k_sem gnss_fix_sem;
 extern struct k_sem gnss_start_sem;
 K_SEM_DEFINE(lte_connected, 0, 1);
+K_SEM_DEFINE(gnss_done_sem, 0, 1);
 
 /* This module does not subscribe to any channels */
 /* Value that holds the latest LTE network mode. */
@@ -271,35 +272,38 @@ static void network_task(void)
 	k_sem_take(&lte_connected, K_FOREVER);
 	print_modem_status();
 
-	err = stop_lte();
-	if (err)
-	{
-		LOG_ERR("Failed to deactivate LTE and enable GNSS functional mode");
-		return;
-	}
+	/* LTE is primary. Stay connected for MQTT/UART forwarding.
+	 * Every CONFIG_MQTT_SAMPLE_NETWORK_GNSS_INTERVAL_SECONDS, briefly
+	 * deactivate LTE, run one GNSS session, then re-enable LTE.
+	 */
 	while (1)
 	{
-		k_sem_take(&gnss_fix_sem, K_FOREVER);
-		k_sleep(K_SECONDS(CONFIG_MQTT_SAMPLE_NETWORK_GNSS_ACTIVE_SECONDS));
-		gnss_active = false;
-		k_sem_give(&lte_connected);
+		LOG_INF("LTE active, next GNSS session in %d s",
+				CONFIG_MQTT_SAMPLE_NETWORK_GNSS_INTERVAL_SECONDS);
+		k_sleep(K_SECONDS(CONFIG_MQTT_SAMPLE_NETWORK_GNSS_INTERVAL_SECONDS));
 
-		LOG_INF("Activating LTE for data transfer");
-		err = start_lte();
-		if (err)
-		{
-			LOG_ERR("Failed to activate LTE");
-			return;
-		}
-		k_sem_take(&gnss_start_sem, K_FOREVER);
+		LOG_INF("Starting GNSS session, deactivating LTE");
 		err = stop_lte();
 		if (err)
 		{
 			LOG_ERR("Failed to deactivate LTE");
 			return;
 		}
+		gnss_active = true;
+		k_sem_give(&gnss_start_sem); /* tell location_task to start GNSS */
+
+		/* Wait for location_task to complete the GNSS session */
+		k_sem_take(&gnss_done_sem, K_FOREVER);
+
+		LOG_INF("GNSS session done, reactivating LTE");
+		err = start_lte();
+		if (err)
+		{
+			LOG_ERR("Failed to activate LTE");
+			return;
+		}
+		k_sem_take(&lte_connected, K_FOREVER);
 	}
-	// k_sleep(K_SECONDS(300));
 }
 
 K_THREAD_DEFINE(network_task_id,

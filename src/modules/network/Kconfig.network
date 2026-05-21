@@ -17,6 +17,14 @@ config MQTT_SAMPLE_NETWORK_GNSS_ACTIVE_SECONDS
 	help
 	  Time spent in GNSS mode after a fix before LTE transfer is re-enabled.
 
+config MQTT_SAMPLE_NETWORK_GNSS_INTERVAL_SECONDS
+	int "Interval between GNSS sessions in seconds (LTE active duration)"
+	default 3600
+	help
+	  How long the device stays on LTE between GNSS sessions.
+	  After this interval, LTE is briefly deactivated to obtain a GNSS fix,
+	  then LTE is re-enabled. Default is 3600 (1 hour).
+
 module = MQTT_SAMPLE_NETWORK
 module-str = Network
 source "subsys/logging/Kconfig.template.log_config"

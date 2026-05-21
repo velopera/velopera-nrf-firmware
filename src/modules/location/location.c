@@ -19,9 +19,9 @@
 /* Register log module */
 LOG_MODULE_REGISTER(location_app, CONFIG_MQTT_SAMPLE_LOCATION_LOG_LEVEL);
 
-extern struct k_sem lte_connected;
 K_SEM_DEFINE(gnss_fix_sem, 0, 1);
 K_SEM_DEFINE(gnss_start_sem, 0, 1);
+extern struct k_sem gnss_done_sem;
 
 struct velopera_gps_data velo_gps_data;
 bool gnss_active;
@@ -175,69 +175,27 @@ static void stop_gnss(void)
 
 static void location_task(void)
 {
-	int err;
-
-	/* Wait untill first LTE connection */
-	while (k_sem_take(&lte_connected, K_FOREVER))
-	{
-	}
-	LOG_INF("Deactivating LTE for first GNSS fix");
-
-	gnss_init_and_start();
-	struct velopera_gps_data velo_gps_test_data;
-
+	/* Wait for network_task to trigger the first GNSS session */
 	while (true)
 	{
-
-		while (gnss_active)
-		{
-			k_sem_take(&gnss_fix_sem, K_FOREVER);
-			zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
-			velo_gps_data.meas_id++;
-			LOG_INF("gps data published to be added in queue");
-		}
-		// k_sleep(K_SECONDS(60));
-		k_sem_take(&lte_connected, K_FOREVER);
-		LOG_INF("GNSS sleep for %d seconds", CONFIG_MQTT_SAMPLE_LOCATION_GNSS_SLEEP_SECONDS);
-
-		stop_gnss();
-
-		k_sleep(K_SECONDS(CONFIG_MQTT_SAMPLE_LOCATION_GNSS_SLEEP_SECONDS));
-
-		k_sem_give(&gnss_start_sem);
-		LOG_INF("Reactivating GNSS");
+		k_sem_take(&gnss_start_sem, K_FOREVER);
+		LOG_INF("GNSS session started");
 
 		gnss_init_and_start();
 
-		// for (int i = 0; i < 4; i++)
-		// {
-		// 	printf("LINE %d\r\n", __LINE__);
-		// 	velo_gps_test_data.pvt.latitude += 2;
-		// 	velo_gps_test_data.pvt.longitude += 2;
-		// 	velo_gps_test_data.pvt.altitude += 2;
-		// 	velo_gps_test_data.pvt.accuracy += 2;
-		// 	velo_gps_test_data.pvt.speed += 2;
-		// 	velo_gps_test_data.pvt.speed_accuracy += 2;
-		// 	velo_gps_test_data.pvt.heading += 2;
-		// 	velo_gps_test_data.pvt.datetime.year += 2;
-		// 	velo_gps_test_data.pvt.datetime.month += 2;
-		// 	velo_gps_test_data.pvt.datetime.day += 2;
-		// 	velo_gps_test_data.pvt.datetime.hour += 2;
-		// 	velo_gps_test_data.pvt.datetime.minute += 2;
-		// 	velo_gps_test_data.pvt.datetime.seconds += 2;
-		// 	velo_gps_test_data.pvt.datetime.ms += 2;
-		// 	velo_gps_test_data.pvt.pdop += 2;
-		// 	velo_gps_test_data.pvt.hdop += 2;
-		// 	velo_gps_test_data.pvt.vdop += 2;
-		// 	velo_gps_test_data.pvt.tdop += 2;
-		// 	velo_gps_test_data.meas_id += 1;
-		// 	zbus_chan_pub(&GPS_CHAN, &velo_gps_test_data, K_SECONDS(10));
-		// 	printf("LINE %d\r\n", __LINE__);
+		/* Wait for a fix */
+		k_sem_take(&gnss_fix_sem, K_FOREVER);
 
-		// 	// printfk_sleep(K_MSEC(2000));
-		// 	printf("LINE %d\r\n", __LINE__);
-		// }
-		// k_sleep(K_SECONDS(20));
+		/* Publish and stop */
+		zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
+		LOG_INF("GPS data published (meas_id=%d)", velo_gps_data.meas_id);
+		velo_gps_data.meas_id++;
+
+		gnss_active = false;
+		stop_gnss();
+
+		/* Tell network_task the GNSS session is complete so LTE can restart */
+		k_sem_give(&gnss_done_sem);
 	}
 }
 
