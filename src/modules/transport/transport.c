@@ -119,44 +119,54 @@ static void publish(struct velopera_payload *payload, uint8_t *topic, size_t top
 
 static int modify_login_info_msg(char *msg, size_t msg_size)
 {
-
 	struct modem_param_info modem_param;
+	int err;
 
-	int err = modem_info_init();
-	if (err)
+	/* modem_info_init() returns -EALREADY if already initialized — that is fine. */
+	err = modem_info_init();
+	if (err && err != -EALREADY)
 	{
-		LOG_ERR("Failed to initialize modem info: %d", err);
+		LOG_WRN("modem_info_init failed (%d), using minimal login message", err);
+		goto fallback;
 	}
 
 	err = modem_info_params_init(&modem_param);
 	if (err)
 	{
-		LOG_ERR("Failed to initialize modem info: %d", err);
+		LOG_WRN("modem_info_params_init failed (%d), using minimal login message", err);
+		goto fallback;
 	}
 
 	err = modem_info_params_get(&modem_param);
 	if (err)
 	{
-		LOG_ERR("Failed to initialize modem info: %d", err);
+		LOG_WRN("modem_info_params_get failed (%d), using minimal login message", err);
+		goto fallback;
 	}
 
-	LOG_DBG("====== modify_login_info_msg ======");
-	err = snprintf(msg, msg_size, "{\"networkStatus\":\"online\",\"rsrp\":%d,\"iccid\":\"%s\",\"mcc\":\"%x\",\"mnc\":\"%s\",\"cid\":\"%s\",\"band\":\"%d\",\"areaCode\":\"%s\",\"op\":\"%s\",\"modem\":\"%s\",\"fw\":\"%s\"}",
+	err = snprintf(msg, msg_size,
+				   "{\"networkStatus\":\"online\",\"rsrp\":%d,\"iccid\":\"%s\","
+				   "\"mcc\":\"%x\",\"mnc\":\"%s\",\"cid\":\"%s\",\"band\":\"%d\","
+				   "\"areaCode\":\"%s\",\"op\":\"%s\",\"modem\":\"%s\",\"fw\":\"%s\"}",
 				   modem_param.network.rsrp.value, modem_param.sim.iccid.value_string,
 				   modem_param.network.mcc.value, modem_param.network.mnc.value_string,
 				   modem_param.network.cellid_hex.value_string, modem_param.network.current_band.value,
 				   modem_param.network.area_code.value_string, modem_param.network.current_operator.value_string,
 				   modem_param.device.modem_fw.value_string, getFirmwareVersion()->full);
 
-	if (err < 0)
+	if (err > 0)
 	{
-		LOG_ERR("snprintf %d", err);
+		LOG_DBG("Login msg: %s", msg);
+		return err;
 	}
 
-	// LOG_INF("IP Address: %s", modem_param.network.ip_address.value_string);
+	LOG_ERR("snprintf failed: %d", err);
 
-	LOG_DBG("msg (JSON): %s, size %d", msg, err);
-	LOG_DBG("===============================");
+fallback:
+	err = snprintf(msg, msg_size,
+				   "{\"networkStatus\":\"online\",\"fw\":\"%s\"}",
+				   getFirmwareVersion()->full);
+	LOG_DBG("Login msg (fallback): %s", msg);
 	return err;
 }
 
