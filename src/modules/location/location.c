@@ -183,17 +183,20 @@ static void location_task(void)
 
 		gnss_init_and_start();
 
-		/* Wait for a fix */
-		k_sem_take(&gnss_fix_sem, K_FOREVER);
+		/* Wait <= 5 minutes for a fix */
+		int ret = k_sem_take(&gnss_fix_sem, Z_TIMEOUT_MS(5*60*1000));
 
-		/* Publish and stop */
-		zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
-		LOG_INF("GPS data published (meas_id=%d)", velo_gps_data.meas_id);
-		velo_gps_data.meas_id++;
+        if (!ret) { // sem taken
+            /* Publish and stop */
+            zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
+            LOG_INF("GPS data published (meas_id=%d)", velo_gps_data.meas_id);
+            velo_gps_data.meas_id++;
+        }
 
 		gnss_active = false;
 		stop_gnss();
 
+		LOG_INF("GNSS stopped");
 		/* Tell network_task the GNSS session is complete so LTE can restart */
 		k_sem_give(&gnss_done_sem);
 	}
