@@ -323,6 +323,27 @@ void test_max_buffer_size(void)
     TEST_PASS();
 }
 
+/* Test 17b: Buffer overflow recovery */
+void test_overflow_recovery(void)
+{
+    TEST_START();
+    test_state_t state;
+    test_reset_state(&state);
+    
+    /* Fill buffer beyond capacity */
+    char large_input[RX_BUF_SIZE + 10];
+    memset(large_input, 'A', sizeof(large_input) - 1);
+    large_input[sizeof(large_input) - 1] = '\n';
+    
+    test_simulate_uart_input(large_input, &state);
+    
+    ASSERT_TRUE(state.overflow_detected);
+    /* After overflow recovery, index should be reset */
+    ASSERT_EQ(state.index, 0);
+    
+    TEST_PASS();
+}
+
 /* Test 18: JSON validation edge cases */
 void test_json_validation_edge_cases(void)
 {
@@ -414,6 +435,7 @@ int main(void)
     test_json_with_escapes();
     test_char_by_char_accumulation();
     test_max_buffer_size();
+    test_overflow_recovery();
     test_json_validation_edge_cases();
     test_mixed_valid_invalid();
     test_json_with_trailing_whitespace();

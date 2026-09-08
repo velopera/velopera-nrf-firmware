@@ -37,8 +37,10 @@ static void uart_handler_sim(char byte, test_state_t *state)
     }
     else
     {
-        /* Buffer overflow */
+        /* Buffer overflow - reset buffer to recover */
         state->overflow_detected = true;
+        memset(state->rx_buf, 0, sizeof(state->rx_buf));
+        state->index = 0;
     }
 }
 

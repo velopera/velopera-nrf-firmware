@@ -36,6 +36,7 @@ static struct k_sem uart_sem; // created semaphore
 uint8_t rx_byte;
 char rx_buf[RX_BUF_SIZE];
 static int index = 0;
+static int overflow_count = 0;
 
 static bool is_whitespace(char c)
 {
@@ -172,8 +173,10 @@ static void uart_handler(const struct device *dev, void *data)
 		}
 		else
 		{
-			LOG_ERR("UART RX ERROR");
-			SEND_FATAL_ERROR();
+			LOG_ERR("UART RX overflow (count=%d)", ++overflow_count);
+			/* Reset buffer to recover from overflow */
+			memset(rx_buf, 0, sizeof(rx_buf));
+			index = 0;
 		}
 	}
 }
