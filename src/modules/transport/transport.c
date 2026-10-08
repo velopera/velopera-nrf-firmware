@@ -8,9 +8,11 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/zbus/zbus.h>
 #include <zephyr/smf.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/net/tls_credentials.h>
 #include "dynsec_mqtt_helper.h"
 #include "message_channel.h"
+#include "trigger.h"
 #include <modem/modem_info.h>
 
 #include "firmware_version.h"
@@ -46,9 +48,20 @@ K_THREAD_STACK_DEFINE(stack_area, CONFIG_MQTT_SAMPLE_TRANSPORT_WORKQUEUE_STACK_S
  * schedule reconnectionn attempts upon network loss or disconnection from MQTT.
  */
 static struct k_work_q transport_queue;
+static atomic_t mqtt_connected = ATOMIC_INIT(0);
 
 struct velopera_payload login_msg;
 struct velopera_gps_data gps_data;
+
+static void mqtt_pub_work_submit(void)
+{
+	int err = k_work_submit_to_queue(&transport_queue, &mqtt_pub_work.work);
+
+	if (err < 0)
+	{
+		LOG_ERR("Failed to schedule MQTT publish work, error: %d", err);
+	}
+}
 
 /* Internal states */
 enum module_state
@@ -62,6 +75,7 @@ static uint8_t gps_pub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE 
 
 static uint8_t fota_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
 static uint8_t psk_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
+static uint8_t request_sub_topic[CONFIG_MQTT_SAMPLE_TRANSPORT_CLIENT_ID_BUFFER_SIZE + sizeof(CONFIG_MQTT_SAMPLE_TRANSPORT_SUBSCRIBE_TOPIC)];
 
 /* User defined state object.
  * Used to transfer data between state changes.
@@ -122,7 +136,6 @@ static int modify_login_info_msg(char *msg, size_t msg_size)
 	struct modem_param_info modem_param;
 	int err;
 
-	/* modem_info_init() returns -EALREADY if already initialized — that is fine. */
 	err = modem_info_init();
 	if (err && err != -EALREADY)
 	{
@@ -176,15 +189,23 @@ fallback:
  */
 static void on_mqtt_connack(enum mqtt_conn_return_code return_code)
 {
-	ARG_UNUSED(return_code);
-
-	smf_set_state(SMF_CTX(&s_obj), &state[MQTT_CONNECTED]);
+	if (return_code == MQTT_CONNECTION_ACCEPTED)
+	{
+		atomic_set(&mqtt_connected, 1);
+		smf_set_state(SMF_CTX(&s_obj), &state[MQTT_CONNECTED]);
+	}
+	else
+	{
+		atomic_set(&mqtt_connected, 0);
+		smf_set_state(SMF_CTX(&s_obj), &state[MQTT_DISCONNECTED]);
+	}
 }
 
 static void on_mqtt_disconnect(int result)
 {
 	ARG_UNUSED(result);
 
+	atomic_set(&mqtt_connected, 0);
 	smf_set_state(SMF_CTX(&s_obj), &state[MQTT_DISCONNECTED]);
 }
 
@@ -195,9 +216,14 @@ static void on_mqtt_publish(struct dynsec_mqtt_helper_buf topic, struct dynsec_m
 			topic.size,
 			topic.ptr);
 
-	if (strncmp(topic.ptr, fota_sub_topic, sizeof(fota_sub_topic)) == 0)
+	bool is_fota_topic = (topic.size == strlen((char *)fota_sub_topic)) &&
+						 (memcmp(topic.ptr, fota_sub_topic, topic.size) == 0);
+	bool is_psk_topic = (topic.size == strlen((char *)psk_sub_topic)) &&
+						(memcmp(topic.ptr, psk_sub_topic, topic.size) == 0);
+
+	if (is_fota_topic)
 	{
-		LOG_DBG("FOTA request received for firmware %s", payload.ptr);
+		LOG_DBG("FOTA request received for firmware %.*s", payload.size, payload.ptr);
 
 		int err = zbus_chan_pub(&FOTA_CHAN, &payload, K_SECONDS(1));
 		if (err)
@@ -206,7 +232,18 @@ static void on_mqtt_publish(struct dynsec_mqtt_helper_buf topic, struct dynsec_m
 			SEND_FATAL_ERROR();
 		}
 
-		LOG_DBG("FOTA request redirected to FOTA_CHAN");
+		return;
+	}
+
+	if (is_psk_topic)
+	{
+		return;
+	}
+
+	int err = trigger_uart_send(payload.ptr, payload.size);
+	if (err)
+	{
+		LOG_ERR("Failed to forward MQTT payload to UART, error: %d", err);
 	}
 }
 
@@ -265,6 +302,15 @@ static int topics_prefix(void)
 		return -EMSGSIZE;
 	}
 
+	len = snprintk(request_sub_topic, sizeof(request_sub_topic), "cmd/%s/%s", imei,
+				   "request");
+
+	if ((len < 0) || (len >= sizeof(request_sub_topic)))
+	{
+		LOG_ERR("Subscribe topic buffer too small %d", __LINE__);
+		return -EMSGSIZE;
+	}
+
 	return 0;
 }
 
@@ -279,6 +325,10 @@ static void subscribe(void)
 		{
 			.topic.utf8 = psk_sub_topic,
 			.topic.size = strlen(psk_sub_topic),
+		},
+		{
+			.topic.utf8 = request_sub_topic,
+			.topic.size = strlen(request_sub_topic),
 		},
 	};
 	struct mqtt_subscription_list list = {
@@ -344,6 +394,12 @@ void mqtt_pub_work_fn(struct k_work *work)
 	struct velopera_gps_data gps_data;
 	struct velopera_payload payload;
 	ARG_UNUSED(work);
+
+	if (!atomic_get(&mqtt_connected))
+	{
+		return;
+	}
+
 	while (k_msgq_get(&gps_data_queue, &gps_data, K_NO_WAIT) == 0)
 	{
 		sprintf(payload.string, GNSS_DATA_JSON,
@@ -454,7 +510,7 @@ static void connected_entry(void *o)
 
 	subscribe();
 
-	k_work_submit_to_queue(&transport_queue, &mqtt_pub_work);
+	mqtt_pub_work_submit();
 }
 
 /* Function executed when the module is in the connected state. */
@@ -471,7 +527,7 @@ static void connected_run(void *o)
 		(void)dynsec_mqtt_helper_disconnect();
 		return;
 	}
-	k_work_submit_to_queue(&transport_queue, &mqtt_pub_work);
+	mqtt_pub_work_submit();
 
 	if (user_object->chan != &MQTT_CHAN)
 	{
@@ -580,6 +636,10 @@ static void transport_task(void)
 			{
 				LOG_WRN("Queue is full, could not add sensor data.\n");
 			}
+			else if (atomic_get(&mqtt_connected))
+			{
+				mqtt_pub_work_submit();
+			}
 
 			// s_obj.payload = payload;
 			// s_obj.topic = pub_topic;
@@ -605,6 +665,10 @@ static void transport_task(void)
 			if (k_msgq_put(&gps_data_queue, &gps_data, K_NO_WAIT) != 0)
 			{
 				LOG_WRN("Queue is full, could not add GPS data.\n");
+			}
+			else if (atomic_get(&mqtt_connected))
+			{
+				mqtt_pub_work_submit();
 			}
 			// s_obj.payload = payload;
 			// s_obj.topic = gps_pub_topic;

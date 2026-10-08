@@ -175,7 +175,6 @@ static void stop_gnss(void)
 
 static void location_task(void)
 {
-	/* Wait for network_task to trigger the first GNSS session */
 	while (true)
 	{
 		k_sem_take(&gnss_start_sem, K_FOREVER);
@@ -183,20 +182,17 @@ static void location_task(void)
 
 		gnss_init_and_start();
 
-		/* Wait <= 5 minutes for a fix */
-		int ret = k_sem_take(&gnss_fix_sem, Z_TIMEOUT_MS(5*60*1000));
+		/* Wait for a fix */
+		k_sem_take(&gnss_fix_sem, K_FOREVER);
 
-        if (!ret) { // sem taken
-            /* Publish and stop */
-            zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
-            LOG_INF("GPS data published (meas_id=%d)", velo_gps_data.meas_id);
-            velo_gps_data.meas_id++;
-        }
+		/* Publish and stop */
+		zbus_chan_pub(&GPS_CHAN, &velo_gps_data, K_SECONDS(10));
+		LOG_INF("GPS data published (meas_id=%d)", velo_gps_data.meas_id);
+		velo_gps_data.meas_id++;
 
 		gnss_active = false;
 		stop_gnss();
 
-		LOG_INF("GNSS stopped");
 		/* Tell network_task the GNSS session is complete so LTE can restart */
 		k_sem_give(&gnss_done_sem);
 	}

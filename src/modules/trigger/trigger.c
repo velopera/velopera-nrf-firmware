@@ -8,6 +8,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/zbus/zbus.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/sys/atomic.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -16,9 +17,11 @@
 #endif /* CONFIG_DK_LIBRARY */
 
 #include "message_channel.h"
+#include "trigger.h"
 #define RX_BUF_SIZE 512
 
 static const struct device *const dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
+static atomic_t uart_ready = ATOMIC_INIT(0);
 
 #define UART_CFG                              \
 	((struct uart_config){                    \
@@ -204,6 +207,32 @@ static int uart_init(void)
 	}
 	/* Enable RX interrupt */
 	uart_irq_rx_enable(dev);
+	atomic_set(&uart_ready, 1);
+
+	return 0;
+}
+
+int trigger_uart_send(const char *data, size_t size)
+{
+	if ((data == NULL) && (size > 0))
+	{
+		return -EINVAL;
+	}
+
+	if (!atomic_get(&uart_ready))
+	{
+		return -EAGAIN;
+	}
+
+	for (size_t i = 0; i < size; i++)
+	{
+		uart_poll_out(dev, (unsigned char)data[i]);
+	}
+
+	if ((size == 0) || ((data[size - 1] != '\n') && (data[size - 1] != '\r')))
+	{
+		uart_poll_out(dev, '\n');
+	}
 
 	return 0;
 }
